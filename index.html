@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebXR Hit-Test</title>
+<style>
+  body { margin: 0; }
+  button { position: absolute; bottom: 30px; left: 50%;
+           transform: translateX(-50%); padding: 12px 24px; font-size: 18px; }
+</style>
+</head>
+<body>
+<button id="start">Начать AR</button>
+<script type="module">
+// ===== Блок 1. Подключение библиотеки =====
+// Загружаем Three.js из интернета; всё из неё доступно через слово THREE
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+// ===== Блок 2. Холст для рисования =====
+// Отрисовщик — рисует 3D на экране.
+// antialias — сглаживание краёв, alpha — прозрачный фон, чтобы было видно видео с камеры
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+// Размер рисунка — на весь экран (ширина и высота окна)
+renderer.setSize(innerWidth, innerHeight);
+// Включаем режим AR/VR (WebXR), без этого AR не заработает
+renderer.xr.enabled = true;
+// Кладём холст на страницу, иначе рисунок никто не увидит
+document.body.appendChild(renderer.domElement);
+
+// ===== Блок 3. Сцена, камера, свет =====
+// Сцена — пустой 3D-мир, куда кладутся объекты
+const scene = new THREE.Scene();
+// Камера: угол обзора 70°, пропорции экрана, видно от 1 см (0.01) до 20 м.
+// Во время AR Three.js сам заменяет её настоящей камерой телефона
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 20);
+// Свет: белый сверху, голубоватый снизу, яркость 3. Без света куб был бы чёрным
+scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 3));
+
+// ===== Блок 4. Зелёное кольцо и заготовка куба =====
+// Кольцо-маркер. Любой видимый объект (Mesh) = форма + материал
+const reticle = new THREE.Mesh(
+  // Форма: кольцо с радиусами 8 и 10 см из 32 кусочков,
+  // повёрнутое на 90° (Math.PI / 2), чтобы лежать на полу, а не стоять
+  new THREE.RingGeometry(0.08, 0.1, 32).rotateX(-Math.PI / 2),
+  // Материал: зелёный цвет, не зависит от света
+  new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+);
+// Запрещаем Three.js самому двигать кольцо — его положение задаёт hit-test
+reticle.matrixAutoUpdate = false;
+// Пока поверхность не найдена, кольцо спрятано
+reticle.visible = false;
+// Кладём кольцо в сцену
+scene.add(reticle);
+
+// Форма куба 10×10×10 см, поднята на 5 см (половину высоты), чтобы стоять НА полу
+const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.1).translate(0, 0.05, 0);
+// Материал куба: синий, реагирует на свет — поэтому видны грани
+const material = new THREE.MeshStandardMaterial({ color: 0x2196f3 });
+// Пустое место под луч hit-test (null — «пока ничего»), луч появится после запуска AR
+let hitTestSource = null;
+
+// ===== Блок 5. Нажатие на кнопку «Начать AR» =====
+// Находим кнопку start и говорим: «при нажатии сделай всё, что ниже»
+document.getElementById('start').onclick = async () => {
+  // Запускаем AR: режим immersive-ar, обязательно нужны hit-test и координаты от пола.
+  // await — ждём, пока пользователь разрешит камеру и AR запустится
+  const session = await navigator.xr.requestSession('immersive-ar',
+    { requiredFeatures: ['hit-test', 'local-floor'] });
+  // Координаты сцены считаются от пола комнаты (local-floor)
+  renderer.xr.setReferenceSpaceType('local-floor');
+  // Отдаём сеанс AR в Three.js — он начинает рисовать сцену поверх камеры
+  await renderer.xr.setSession(session);
+  // Координаты от телефона (viewer — «смотрящий»), нужны, чтобы луч шёл из телефона вперёд
+  const viewerSpace = await session.requestReferenceSpace('viewer');
+  // Создаём луч hit-test (XRHitTestSource) из центра экрана телефона
+  hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+
+  // Когда пользователь тапнет по экрану (в WebXR тап называется select):
+  session.addEventListener('select', () => {
+    // если кольца не видно (поверхность не найдена) — ничего не делаем
+    if (!reticle.visible) return;
+    // создаём новый куб из заготовленных формы и материала
+    const cube = new THREE.Mesh(geometry, material);
+    // копируем кубу положение, поворот и размер кольца — куб встаёт туда, где кольцо
+    reticle.matrix.decompose(cube.position, cube.quaternion, cube.scale);
+    // кладём куб в сцену (в комнату): он не связан с телефоном и стоит на месте
+    scene.add(cube);
+  });
+
+  // Когда пользователь выйдет из AR — стираем луч, он больше не нужен
+  session.addEventListener('end', () => { hitTestSource = null; });
+};
+
+// ===== Блок 6. Каждый кадр (30–60 раз в секунду) =====
+// frame — снимок текущего момента от AR: где телефон и что видит луч
+renderer.setAnimationLoop((time, frame) => {
+  // Работаем, только если AR запущен (есть frame) и луч создан (есть hitTestSource)
+  if (frame && hitTestSource) {
+    // Спрашиваем, куда попал луч: список точек на поверхностях, ближайшая — первая
+    const results = frame.getHitTestResults(hitTestSource);
+    // Если луч во что-то попал:
+    if (results.length) {
+      // берём первую точку [0] и переводим её в координаты комнаты (local-floor)
+      const pose = results[0].getPose(renderer.xr.getReferenceSpace());
+      // переносим кольцо в эту точку (матрица — 16 чисел: положение и поворот)
+      reticle.matrix.fromArray(pose.transform.matrix);
+      // показываем кольцо
+      reticle.visible = true;
+    } else {
+      // луч никуда не попал — прячем кольцо
+      reticle.visible = false;
+    }
+  }
+  // Рисуем кадр: всю сцену с камеры на экран
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
